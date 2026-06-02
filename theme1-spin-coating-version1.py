@@ -18,12 +18,10 @@ def eta_meyerhofer(t, eta0, B):
     return eta0 * np.exp(B * t)
 
 
-def predict_t_gel(eta0, B, eta_gel):
+def predict_t_gel(eta0, B, gel_factor):
     if B <= 0:
         return None
-    if eta_gel <= eta0:
-        return 0.0
-    return np.log(eta_gel / eta0) / B
+    return np.log(gel_factor) / B
 
 
 def uniformity_percent(h):
@@ -221,7 +219,10 @@ rho = st.sidebar.number_input("Density ρ [kg/m³]", value=1000.0, step=50.0)
 
 E_um_s = st.sidebar.slider("Evaporation Rate E [μm/s]", 0.00, 0.20, 0.03, 0.01)
 B = st.sidebar.slider("Viscosity Growth Rate B [1/s]", 0.00, 0.10, 0.03, 0.005)
-eta_gel = st.sidebar.slider("Gel Viscosity η_gel [Pa·s]", 0.10, 5.00, 1.00, 0.10)
+
+# Gel criterion: eta_gel = 20 * eta0
+gel_factor = 20.0
+eta_gel = gel_factor * eta0
 
 h_dry_um = st.sidebar.slider("Dry Film Thickness Limit h_dry [μm]", 0.10, 5.00, 0.50, 0.10)
 R_cm = st.sidebar.slider("Wafer Radius R [cm]", 1.0, 10.0, 5.0, 0.5)
@@ -284,7 +285,7 @@ r, profiles, profile_time, radial_data = simulate_radial_model(
 
 final_profile = profiles[-1]
 final_uniformity = radial_data["uniformity_percent"].iloc[-1]
-t_gel = predict_t_gel(eta0, B, eta_gel)
+t_gel = predict_t_gel(eta0, B, gel_factor)
 
 
 # =====================================================
@@ -292,7 +293,7 @@ t_gel = predict_t_gel(eta0, B, eta_gel)
 # =====================================================
 
 st.title("Spin Coating Thin-Film Simulator")
-st.caption("EBP Model + Meyerhofer-type Model + radial uniformity + validation + design exploration")
+st.caption("EBP Model + Meyerhofer-type Model + radial uniformity + validation + gel-time prediction")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -305,7 +306,7 @@ col5, col6, col7, col8 = st.columns(4)
 
 col5.metric("Radial Uniformity", f"±{final_uniformity:.3f} %")
 col6.metric("Angular Velocity ω", f"{rpm_to_omega(rpm):.1f} rad/s")
-col7.metric("Wafer Radius", f"{R_cm:.1f} cm")
+col7.metric("η_gel = 20η₀", f"{eta_gel:.3f} Pa·s")
 
 if t_gel is None:
     col8.metric("t_gel Prediction", "Not reached")
@@ -348,6 +349,8 @@ with tab1:
     st.latex(r"\frac{dh}{dt}=-\frac{2\rho\omega^2}{3\eta}h^3")
     st.latex(r"\eta(t)=\eta_0 e^{Bt}")
     st.latex(r"\frac{dh}{dt}=-\frac{2\rho\omega^2}{3\eta_0 e^{Bt}}h^3-E")
+    st.latex(r"\eta_{gel}=20\eta_0")
+    st.latex(r"t_{gel}=\frac{\ln(20)}{B}")
 
 
 # =====================================================
@@ -428,16 +431,6 @@ with tab3:
 
     error = np.max(np.abs(h_ebp_num - h_ebp_exact)) * 1e6
     st.metric("Maximum Validation Error", f"{error:.6f} μm")
-
-    st.markdown(
-        """
-        Validation meaning:
-
-        - When evaporation is ignored and viscosity is constant, the numerical simulator should reproduce the analytical EBP solution.
-        - If η becomes very large, centrifugal thinning becomes weak.
-        - This corresponds to the analytical limit where viscous resistance dominates.
-        """
-    )
 
 
 # =====================================================
@@ -521,24 +514,18 @@ with tab4:
 with tab5:
     st.subheader("Design Exploration Mode")
 
-    st.markdown(
-        """
-        This mode summarizes the current user-editable geometry and process conditions.
-        The final radial uniformity updates according to the selected input parameters.
-        """
-    )
-
     design_df = pd.DataFrame({
         "Parameter": [
             "RPM",
             "Angular velocity ω [rad/s]",
             "Initial viscosity η₀ [Pa·s]",
+            "Gel criterion",
+            "Gel viscosity η_gel [Pa·s]",
+            "t_gel prediction [s]",
             "Initial thickness h₀ [μm]",
             "Wafer radius R [cm]",
             "Evaporation rate E [μm/s]",
             "Viscosity growth rate B [1/s]",
-            "Gel viscosity η_gel [Pa·s]",
-            "t_gel prediction [s]",
             "Edge bead strength",
             "Edge bead width ratio",
             "Radial leveling coefficient",
@@ -548,12 +535,13 @@ with tab5:
             rpm,
             rpm_to_omega(rpm),
             eta0,
+            f"{gel_factor:.0f} × η₀",
+            eta_gel,
+            "Not reached" if t_gel is None or t_gel > t_end else round(t_gel, 3),
             h0_um,
             R_cm,
             E_um_s,
             B,
-            eta_gel,
-            "Not reached" if t_gel is None or t_gel > t_end else round(t_gel, 3),
             edge_bead_strength,
             edge_bead_width_ratio,
             leveling_coeff,
@@ -586,7 +574,7 @@ with tab6:
         4. Increasing RPM generally improves radial leveling.
         5. Increasing initial viscosity η₀ suppresses radial flow and can worsen uniformity.
         6. Evaporation reduces total thickness but does not automatically improve radial uniformity.
-        7. The predicted gel time indicates when viscosity becomes high enough to strongly suppress flow.
+        7. Gel time is defined as the time when η(t) = 20η₀.
 
         ### Recommendation to a fab engineer
 
@@ -596,9 +584,7 @@ with tab6:
         - Reduce edge bead strength by optimizing dispense volume, acceleration ramp, and edge bead removal.
         - Choose process conditions satisfying:
 
-        \\[
-        Uniformity = \\frac{{h_{{max}}-h_{{min}}}}{{2h_{{avg}}}}\\times 100 \\leq {spec:.2f}\\%
-        \\]
+        Uniformity = (h_max - h_min) / (2 h_avg) × 100 ≤ ±{spec:.2f}%
         """
     )
 
@@ -609,7 +595,6 @@ with tab6:
 
 with tab7:
     st.subheader("Simulation Data")
-
     st.dataframe(radial_data)
 
     st.markdown("### Final Radial Profile Data")
